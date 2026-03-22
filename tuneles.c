@@ -26,116 +26,141 @@ void to_uppercase(char *str)
 
 int main(int argc, char *argv[])
 {
-#ifdef _WIN32
-    HANDLE hPipeRead, hPipeWrite;
-    SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), NULL, TRUE};
+    #ifdef _WIN32
+        HANDLE hPipe;
+        HANDLE hMapFile;
+        HANDLE sem;
+        char *shared_mem;
 
-    CreatePipe(&hPipeRead, &hPipeWrite, &sa, 0);
+        hMapFile = CreateFileMapping(INVALID_HANDLE_VALUE, NULL,
+                                    PAGE_READWRITE, 0, SIZE,
+                                    "Global\\MySharedMemory");
 
-    HANDLE hMapFile = CreateFileMapping(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, SIZE, "Global\\SharedMemory");
-    char *shared_mem = (char *)MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, SIZE);
+        shared_mem = (char *)MapViewOfFile(hMapFile,
+                                        FILE_MAP_ALL_ACCESS,
+                                        0, 0, SIZE);
 
-    HANDLE sem = CreateSemaphore(NULL, 0, 1, "Global\\Semaphore");
+        sem = CreateSemaphore(NULL, 0, 1, "Global\\MySemaphore");
 
-    if (argc > 1 && strcmp(argv[1], "hijo1") == 0)
-    {
+        if (argc > 1 && strcmp(argv[1], "hijo1") == 0) {
 
-        char buffer[SIZE];
+            char buffer[SIZE];
 
-        printf("Ingrese texto: ");
-        fgets(buffer, SIZE, stdin);
+            printf("Ingrese texto: ");
+            fgets(buffer, SIZE, stdin);
 
-        DWORD written;
-        WriteFile(hPipeWrite, buffer, strlen(buffer) + 1, &written, NULL);
+            hPipe = CreateFile("\\\\.\\pipe\\MyPipe",
+                            GENERIC_WRITE, 0, NULL,
+                            OPEN_EXISTING, 0, NULL);
+
+            DWORD written;
+            WriteFile(hPipe, buffer, strlen(buffer) + 1, &written, NULL);
+
+            CloseHandle(hPipe);
+
+            WaitForSingleObject(sem, INFINITE);
+
+            printf("Hijo1 recibe: %s\n", shared_mem);
+
+            return 0;
+        }
+        if (argc > 1 && strcmp(argv[1], "hijo2") == 0) {
+
+            char buffer[SIZE];
+            DWORD read;
+
+            hPipe = CreateNamedPipe(
+                "\\\\.\\pipe\\MyPipe",
+                PIPE_ACCESS_INBOUND,
+                PIPE_TYPE_BYTE | PIPE_WAIT,
+                1, SIZE, SIZE, 0, NULL
+            );
+
+            ConnectNamedPipe(hPipe, NULL);
+
+            ReadFile(hPipe, buffer, SIZE, &read, NULL);
+
+            to_uppercase(buffer);
+
+            strcpy(shared_mem, buffer);
+
+            CloseHandle(hPipe);
+
+            ReleaseSemaphore(sem, 1, NULL);
+
+            return 0;
+        }
+        STARTUPINFO si1 = { sizeof(si1) };
+        PROCESS_INFORMATION pi1;
+
+        STARTUPINFO si2 = { sizeof(si2) };
+        PROCESS_INFORMATION pi2;
+
+        char cmd1[] = ".\\tuneles.exe hijo1";
+        char cmd2[] = ".\\tuneles.exe hijo2";
+
+        CreateProcess(NULL, cmd2, NULL, NULL, FALSE, 0, NULL, NULL, &si2, &pi2);
+
+        Sleep(500); 
+
+        CreateProcess(NULL, cmd1, NULL, NULL, FALSE, 0, NULL, NULL, &si1, &pi1);
 
         WaitForSingleObject(sem, INFINITE);
 
-        printf("Hijo1 recibe: %s\n", shared_mem);
-        return 0;
-    }
-    if (argc > 1 && strcmp(argv[1], "hijo2") == 0)
-    {
+        printf("Padre lee: %s\n", shared_mem);
 
-        char buffer[SIZE];
-        DWORD read;
+        WaitForSingleObject(pi1.hProcess, INFINITE);
+        WaitForSingleObject(pi2.hProcess, INFINITE);
+    #else
+        int pipefd[2];
+        pipe(pipefd);
 
-        ReadFile(hPipeRead, buffer, SIZE, &read, NULL);
+        char *shared_mem = mmap(NULL, SIZE, PROT_READ | PROT_WRITE,
+                                MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
-        to_uppercase(buffer);
+        sem_t *sem = mmap(NULL, sizeof(sem_t),
+                        PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
-        strcpy(shared_mem, buffer);
+        sem_init(sem, 1, 0);
 
-        ReleaseSemaphore(sem, 1, NULL);
-        return 0;
-    }
-    STARTUPINFO si1 = {sizeof(si1)};
-    PROCESS_INFORMATION pi1;
+        pid_t pid1 = fork();
 
-    STARTUPINFO si2 = {sizeof(si2)};
-    PROCESS_INFORMATION pi2;
+        if (pid1 == 0)
+        {
+            char buffer[SIZE];
 
-    char cmd1[] = "tuneles.exe hijo1";
-    char cmd2[] = "tuneles.exe hijo2";
+            printf("Ingrese texto: ");
+            fgets(buffer, SIZE, stdin);
 
-    CreateProcess(NULL, cmd1, NULL, NULL, TRUE, 0, NULL, NULL, &si1, &pi1);
-    CreateProcess(NULL, cmd2, NULL, NULL, TRUE, 0, NULL, NULL, &si2, &pi2);
+            write(pipefd[1], buffer, strlen(buffer) + 1);
 
-    WaitForSingleObject(sem, INFINITE);
+            sem_wait(sem);
 
-    printf("Padre lee: %s\n", shared_mem);
+            printf("Hijo1 recibe: %s\n", shared_mem);
+            exit(0);
+        }
 
-    WaitForSingleObject(pi1.hProcess, INFINITE);
-    WaitForSingleObject(pi2.hProcess, INFINITE);
-#else
-    int pipefd[2];
-    pipe(pipefd);
+        pid_t pid2 = fork();
 
-    char *shared_mem = mmap(NULL, SIZE, PROT_READ | PROT_WRITE,
-                            MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        if (pid2 == 0)
+        {
+            char buffer[SIZE];
 
-    sem_t *sem = mmap(NULL, sizeof(sem_t),
-                      PROT_READ | PROT_WRITE,
-                      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+            read(pipefd[0], buffer, SIZE);
 
-    sem_init(sem, 1, 0);
+            to_uppercase(buffer);
 
-    pid_t pid1 = fork();
+            strcpy(shared_mem, buffer);
 
-    if (pid1 == 0)
-    {
-        char buffer[SIZE];
+            sem_post(sem);
+            exit(0);
+        }
 
-        printf("Ingrese texto: ");
-        fgets(buffer, SIZE, stdin);
+        wait(NULL);
+        wait(NULL);
 
-        write(pipefd[1], buffer, strlen(buffer) + 1);
-
-        sem_wait(sem);
-
-        printf("Hijo1 recibe: %s\n", shared_mem);
-        exit(0);
-    }
-
-    pid_t pid2 = fork();
-
-    if (pid2 == 0)
-    {
-        char buffer[SIZE];
-
-        read(pipefd[0], buffer, SIZE);
-
-        to_uppercase(buffer);
-
-        strcpy(shared_mem, buffer);
-
-        sem_post(sem);
-        exit(0);
-    }
-
-    wait(NULL);
-    wait(NULL);
-
-    printf("Padre lee: %s\n", shared_mem);
-#endif
+        printf("Padre lee: %s\n", shared_mem);
+    #endif
     return 0;
 }
